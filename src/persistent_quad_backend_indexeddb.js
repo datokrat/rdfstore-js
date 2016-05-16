@@ -1,7 +1,6 @@
 
 // imports
 var utils = require('./utils');
-var diskDB = require('./diskdb');
 var _ = utils;
 var async = utils;
 
@@ -15,7 +14,7 @@ var async = utils;
  * GSP  (s, ?, ?, g), (s, p, ?, g)
  * OS   (s, ?, o, ?)
  *
- * @param configuration['dbName'] Name for the db
+ * @param configuration['dbName'] Name for the IndexedDB
  * @return The newly created backend.
  */
 QuadBackend = function (configuration, callback) {
@@ -23,7 +22,7 @@ QuadBackend = function (configuration, callback) {
 
     if (arguments !== 0) {
 
-        diskDB.register(that);
+        utils.registerIndexedDB(that);
 
         this.indexMap = {};
         this.indices = ['SPOG', 'GP', 'OGS', 'POG', 'GSP', 'OS'];
@@ -37,10 +36,23 @@ QuadBackend = function (configuration, callback) {
         };
 
         that.dbName = configuration['name'] || "rdfstorejs";
-        var keys = {}; keys[that.dbName] = { name: 'SPOG' }
-        var request = that.db.open(this.dbName+"_db", [ that.dbName ], keys);
-        
-        callback(that);
+        var request = that.indexedDB.open(this.dbName+"_db", 1);
+        request.onerror = function(event) {
+            callback(null,new Error("Error opening IndexedDB: " + event.target.errorCode));
+        };
+        request.onsuccess = function(event) {
+            that.db = event.target.result;
+            callback(that);
+        };
+        request.onupgradeneeded = function(event) {
+            var db = event.target.result;
+            var objectStore = db.createObjectStore(that.dbName, { keyPath: 'SPOG'});
+            _.each(that.indices, function(index){
+                if(index !== 'SPOG') {
+                    objectStore.createIndex(index,index,{unique: false});
+                }
+            });
+        };
     }
 };
 
@@ -50,47 +62,74 @@ QuadBackend.prototype.index = function (quad, callback) {
     _.each(this.indices, function(index){
         quad[index] = that._genMinIndexKey(quad, index);
     });
-    
-    var objectStore = that.db.getStore(that.dbName);
-    var request = objectStore.insert(quad);
-    if(!request.error) {
-        callback(true);
-    }
-    else callback(request.error);
+
+    var transaction = that.db.transaction([that.dbName],"readwrite");
+    transaction.oncomplete = function(event) {
+        //callback(true)
+    };
+    transaction.onerror = function(event) {
+        callback(null, new Error(event.target.statusCode));
+    };
+    var objectStore = transaction.objectStore(that.dbName);
+    var request = objectStore.add(quad);
+    request.onsuccess = function(event) {
+        callback(true)
+    };
 };
 
 QuadBackend.prototype.range = function (pattern, callback) {
     var that = this;
-    var objectStore = that.db.getStore(that.dbName);
+    var objectStore = that.db.transaction([that.dbName]).objectStore(that.dbName);
     var indexKey = this._indexForPattern(pattern);
     var minIndexKeyValue = this._genMinIndexKey(pattern,indexKey);
     var maxIndexKeyValue = this._genMaxIndexKey(pattern,indexKey);
+    var keyRange = that.IDBKeyRange.bound(minIndexKeyValue, maxIndexKeyValue, false, false);
     var quads = [];
+    var cursorSource;
 
-    var tmp = objectStore.getAll();
-    _.each(tmp, function(el) {
-      if(el[indexKey] >= minIndexKeyValue && el[indexKey] <= maxIndexKeyValue)
-        quads.push(el);
-    })
-    callback(quads);
+    if(indexKey === 'SPOG') {
+        cursorSource = objectStore;
+    } else {
+        cursorSource = objectStore.index(indexKey);
+    }
+
+    cursorSource.openCursor(keyRange).onsuccess = function(event) {
+        var cursor = event.target.result;
+        if (cursor) {
+            quads.push(cursor.value);
+            cursor.continue();
+        } else {
+            callback(quads);
+        }
+    }
 };
 
 QuadBackend.prototype.search = function (quad, callback) {
     var that = this;
-    var objectStore = that.db.getStore(that.dbName);
+    var objectStore = that.db.transaction([that.dbName]).objectStore(that.dbName);
     var indexKey = this._genMinIndexKey(quad, 'SPOG');
-    var result = objectStore.getOne('SPOG', indexKey);
-    callback(result != null);
+    var request = objectStore.get(indexKey);
+    request.onerror = function(event) {
+        callback(null, new Error(event.target.statusCode));
+    };
+    request.onsuccess = function(event) {
+        callback(event.target.result != null);
+    };
 };
 
 
 QuadBackend.prototype.delete = function (quad, callback) {
     var that = this;
     var indexKey = that._genMinIndexKey(quad, 'SPOG');
-    var request = that.db
-        .getStore(that.dbName)
-        .delete('SPOG', indexKey);
-    callback(true);
+    var request = that.db.transaction([that.dbName], "readwrite")
+        .objectStore(that.dbName)
+        .delete(indexKey);
+    request.onsuccess = function() {
+        callback(true);
+    };
+    request.onerror = function(event) {
+        callback(null, new Error(event.target.statusCode));
+    };
 };
 
 QuadBackend.prototype._genMinIndexKey = function(quad,index) {
@@ -151,7 +190,10 @@ QuadBackend.prototype._indexForPattern = function (pattern) {
 
 QuadBackend.prototype.clear = function(callback) {
     var that = this;
-    request = that.db.clear(that.dbName);
+    var transaction = that.db.transaction([that.dbName],"readwrite"), request;
+    request = transaction.objectStore(that.dbName).clear();
+    request.onsuccess = function(){ callback(); };
+    request.onerror = function(){ callback(); };
 };
 
 module.exports.QuadBackend = QuadBackend;
