@@ -52,6 +52,7 @@ function DbStore(db, name, key, keyName) {
   
   this.getOne = function(property, value) {
     var pattern = {}; pattern[property] = value;
+    console.log('getOne', property, value, this.collection.findOne(pattern));
     return this.collection.findOne(pattern);
   }
   
@@ -62,9 +63,9 @@ function DbStore(db, name, key, keyName) {
   
   this.applyKey = function(object) {
     if(object[this.key] || !this.autoInc) return;
-    var last = this.db[this.keyName].findOne({ name: this.name });
+    var last = this.db[this.keyName].findOne({ name: 'keys' });
     last = last ? last.key : 0;
-    this.db[keyName].update({ name: this.name }, { name: this.name, key: last+1 }, { upsert: true });
+    this.db[this.keyName].update({ name: 'keys' }, { name: 'keys', key: last+1 }, { upsert: true });
     object[this.key] = last+1;
   }
 }
